@@ -141,4 +141,15 @@ if st.sidebar.button("🚀 분석 시작"):
             c2.metric("최적 활주로 방향", f"{int(best['angle']/10):02d}-{int((best['angle']+180)/10):02d}", f"{int(best['angle'])}°")
             c3.metric("최대 이용률", f"{best['usability']:.2f}%")
             
-            t1, t2 = st.tabs(["📊 방향별 이용률",
+            t1, t2 = st.tabs(["📊 방향별 이용률", "🌬️ 바람장미"])
+            with t1:
+                fig1 = px.line(res_df, x='angle', y='usability', title=f"Runway Usability ({start_date} ~ {end_date})")
+                fig1.add_hline(y=95, line_dash="dash", line_color="red", annotation_text="ICAO 95%")
+                st.plotly_chart(fig1, use_container_width=True)
+            with t2:
+                fig2 = px.bar_polar(df, r="ws_kt", theta="wd", color="ws_kt", 
+                                   color_continuous_scale=px.colors.sequential.Viridis,
+                                   title="Wind Rose (바람장미)")
+                st.plotly_chart(fig2, use_container_width=True)
+        else:
+            status_text.error("데이터를 가져오지 못했습니다. 날짜 범위를 다시 확인해 주세요.")
