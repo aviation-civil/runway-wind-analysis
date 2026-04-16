@@ -4,157 +4,141 @@ import numpy as np
 import requests
 import plotly.express as px
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
-# 1. 페이지 설정
-st.set_page_config(page_title="측풍 영향 활주로 분석기 V2.2", layout="wide")
-st.title("✈️ 활주로 이용률 정밀 분석 (데이터 가용성 체크 기능 포함)")
+# 1. 페이지 설정 및 캐시 기능 정의
+st.set_page_config(page_title="측풍 영향 활주로 분석기 V2.5", layout="wide")
 
-# --- 기상청 ASOS 지점 리스트 및 주요 설치 정보 (예시 포함) ---
-# 실제 운영 시작일 정보를 일부 포함하여 사용자에게 가이드를 줍니다.
-STATIONS = {
-    "90": "속초", "93": "북춘천", "95": "철원", "98": "동두천", "99": "파주",
-    "100": "대관령", "101": "춘천", "102": "백령도", "104": "북강릉", "105": "강릉",
-    "108": "서울", "112": "인천", "115": "울릉도", "119": "수원", "121": "영월",
-    "127": "충주", "129": "서산", "131": "청주", "133": "대전", "135": "추풍령",
-    "136": "안동", "138": "포항", "140": "군산", "143": "대구", "146": "전주",
-    "152": "울산", "155": "창원", "156": "광주", "159": "부산", "162": "통영",
-    "165": "목포", "168": "여수", "170": "완도", "172": "고창", "174": "순천",
-    "184": "제주", "185": "고산", "188": "성산", "189": "서귀포", "192": "진주",
-    "201": "강화", "202": "양평", "203": "이천", "212": "홍천", "216": "태백",
-    "221": "제천", "226": "보은", "232": "천안", "235": "보령", "236": "부여",
-    "238": "금산", "239": "세종", "243": "부안", "245": "정읍", "247": "남원",
-    "248": "장수", "252": "영광군", "253": "김해시", "257": "양산시", "258": "보성군",
-    "259": "강진군", "260": "장흥", "261": "해남", "262": "고흥", "263": "의령군",
-    "264": "함양군", "266": "광양시", "268": "진도군", "271": "봉화", "272": "영주",
-    "273": "문경", "277": "영덕", "278": "의성", "279": "구미", "281": "영천",
-    "283": "경주시", "284": "거창", "285": "합천", "288": "밀양", "289": "산청",
-    "294": "거제", "295": "남해"
-}
-
-# 2. 사이드바 설정
-st.sidebar.header("📋 분석 환경 설정")
-api_key = st.sidebar.text_input("1. API Key (Decoding)", type="password")
-
-# 관측소 선택
-station_name = st.sidebar.selectbox("2. 관측소 선택", list(STATIONS.values()), index=list(STATIONS.values()).index("목포"))
-stn_id = [k for k, v in STATIONS.items() if v == station_name][0]
-
-st.sidebar.info(f"선택된 관측소: {station_name} (코드: {stn_id})")
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("📅 분석 기간 설정")
-start_date = st.sidebar.date_input("시작일", date(2023, 1, 1))
-end_date = st.sidebar.date_input("종료일", date(2023, 12, 31))
-
-limit_kt = st.sidebar.selectbox("3. 측풍 허용치 (Knot)", [10, 13, 20], index=0)
-
-# 3. 데이터 수집 함수 (데이터 존재 여부 체크 로직 포함)
-def fetch_data(key, stn, s_date, e_date):
+# --- 성능 최적화를 위한 데이터 캐싱 함수 ---
+@st.cache_data(show_spinner=False)
+def get_cached_weather_data(key, stn, s_date, e_date):
     url = "http://apis.data.go.kr/1360000/AsosHourlyInfoService/getWthrDataList"
     all_data = []
-    
     s_dt = s_date.strftime("%Y%m%d")
     e_dt = e_date.strftime("%Y%m%d")
     
-    msg_slot = st.empty()
-    progress_bar = st.progress(0)
+    # 데이터 총 개수 파악을 위한 첫 호출
+    params = {
+        'serviceKey': key, 'pageNo': '1', 'numOfRows': '1',
+        'dataType': 'JSON', 'dataCd': 'ASOS', 'dateCd': 'HR',
+        'startDt': s_dt, 'startHh': '01', 'endDt': e_dt, 'endHh': '23', 'stnIds': stn
+    }
     
-    # 데이터 수집 (최대 100페이지)
-    for page in range(1, 101):
-        params = {
-            'serviceKey': key, 'pageNo': str(page), 'numOfRows': '999',
-            'dataType': 'JSON', 'dataCd': 'ASOS', 'dateCd': 'HR',
-            'startDt': s_dt, 'startHh': '01', 'endDt': e_dt, 'endHh': '23', 'stnIds': stn
-        }
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        res_json = r.json()
+        total_count = int(res_json.get('response', {}).get('body', {}).get('totalCount', 0))
         
-        try:
+        if total_count == 0:
+            return None, 0
+            
+        # 실제 데이터 수집 (999개씩 분할 호출)
+        num_pages = (total_count // 999) + 1
+        for page in range(1, num_pages + 1):
+            params['pageNo'] = str(page)
+            params['numOfRows'] = '999'
             r = requests.get(url, params=params, timeout=20)
-            res_json = r.json()
-            
-            # 응답 코드 체크
-            header = res_json.get('response', {}).get('header', {})
-            if header.get('resultCode') != '00':
-                st.error(f"❌ API 오류: {header.get('resultMsg')}")
-                return None
-                
-            body = res_json.get('response', {}).get('body', {})
-            items = body.get('items', {}).get('item', [])
-            
-            # 데이터 형태 보정 (1개일 때 dict -> list)
+            items = r.json().get('response', {}).get('body', {}).get('items', {}).get('item', [])
             if isinstance(items, dict): items = [items]
-            
-            if not items:
-                if page == 1:
-                    st.warning(f"💡 {station_name}({stn}) 관측소의 {s_date.year}년 근처 데이터를 찾을 수 없습니다. 관측 기간을 확인해 주세요.")
-                break
-                
             all_data.extend(items)
-            msg_slot.info(f"데이터 수집 중: {len(all_data)}행 확보...")
-            progress_bar.progress(min(page / 20, 1.0))
-            time.sleep(0.1)
+            time.sleep(0.01) # 속도 향상을 위해 대기시간 최소화
             
-        except Exception as e:
-            st.error(f"시스템 오류: {e}")
-            break
-            
-    if not all_data: return None
-    
-    df = pd.DataFrame(all_data)
-    df['wd'] = pd.to_numeric(df['wd'], errors='coerce')
-    df['ws'] = pd.to_numeric(df['ws'], errors='coerce')
-    df = df.dropna(subset=['wd', 'ws'])
-    df['ws_kt'] = df['ws'] * 1.94384
-    
-    msg_slot.success(f"✅ 분석 준비 완료! 총 {len(df)}개의 시간별 데이터를 수집했습니다.")
-    return df
+        df = pd.DataFrame(all_data)
+        df['wd'] = pd.to_numeric(df['wd'], errors='coerce')
+        df['ws_kt'] = pd.to_numeric(df['ws'], errors='coerce') * 1.94384
+        return df.dropna(subset=['wd', 'ws_kt']), total_count
+    except:
+        return None, 0
 
-# 4. 분석 버튼 및 결과 출력
+# 2. 관측소 상세 정보 (지점번호: [이름, 관측시작일])
+STATION_DB = {
+    "90": ["속초", "1968-01-01"], "93": ["북춘천", "2016-10-01"], "95": ["철원", "1988-01-01"],
+    "98": ["동두천", "1998-02-01"], "99": ["파주", "2001-12-01"], "100": ["대관령", "1971-12-01"],
+    "101": ["춘천", "1966-01-01"], "102": ["백령도", "2000-01-01"], "104": ["북강릉", "2008-10-01"],
+    "105": ["강릉", "1911-10-01"], "108": ["서울", "1907-10-01"], "112": ["인천", "1904-08-01"],
+    "114": ["원주", "1971-01-01"], "115": ["울릉도", "1938-08-01"], "119": ["수원", "1964-01-01"],
+    "121": ["영월", "1994-01-01"], "127": ["충주", "1972-01-01"], "129": ["서산", "1968-01-01"],
+    "130": ["울진", "1971-01-01"], "131": ["청주", "1967-01-01"], "133": ["대전", "1969-01-01"],
+    "135": ["추풍령", "1935-01-01"], "136": ["안동", "1973-01-01"], "137": ["상주", "2002-01-01"],
+    "138": ["포항", "1943-01-01"], "140": ["군산", "1968-01-01"], "143": ["대구", "1907-01-01"],
+    "146": ["전주", "1918-01-01"], "152": ["울산", "1931-01-01"], "155": ["창원", "1985-01-01"],
+    "156": ["광주", "1938-10-01"], "159": ["부산", "1904-04-01"], "162": ["통영", "1968-01-01"],
+    "165": ["목포", "1904-04-01"], "168": ["여수", "1942-02-01"], "169": ["흑산도", "1997-01-01"],
+    "170": ["완도", "1971-01-01"], "172": ["고창", "2010-12-01"], "174": ["순천", "1973-01-01"],
+    "184": ["제주", "1923-05-01"], "185": ["고산", "1988-01-01"], "188": ["성산", "1973-01-01"],
+    "189": ["서귀포", "1961-01-01"], "192": ["진주", "1969-01-01"], "201": ["강화", "1972-01-01"],
+    "202": ["양평", "1972-01-01"], "203": ["이천", "1972-01-01"], "211": ["인제", "1972-01-01"],
+    "212": ["홍천", "1972-01-01"], "216": ["태백", "1985-01-01"], "217": ["정선군", "2010-01-01"],
+    "221": ["제천", "1972-01-01"], "226": ["보은", "1972-01-01"], "232": ["천안", "1972-01-01"],
+    "235": ["보령", "1972-01-01"], "236": ["부여", "1972-01-01"], "238": ["금산", "1972-01-01"],
+    "239": ["세종", "2019-10-01"], "243": ["부안", "1972-01-01"], "244": ["임실", "1972-01-01"],
+    "245": ["정읍", "1972-01-01"], "247": ["남원", "1972-01-01"], "248": ["장수", "1972-01-01"],
+    "251": ["고창군", "2010-01-01"], "252": ["영광군", "2010-01-01"], "253": ["김해시", "2010-01-01"],
+    "254": ["순창군", "2010-01-01"], "255": ["북창원", "2010-01-01"], "257": ["양산시", "2010-01-01"],
+    "258": ["보성군", "2010-01-01"], "259": ["강진군", "2009-12-01"], "260": ["장흥", "1972-01-01"],
+    "261": ["해남", "2010-05-01"], "262": ["고흥", "1972-01-01"], "263": ["의령군", "2010-01-01"],
+    "264": ["함양군", "2010-01-01"], "266": ["광양시", "2010-01-01"], "268": ["진도군", "2009-12-01"],
+    "271": ["봉화", "1988-01-01"], "272": ["영주", "1972-01-01"], "273": ["문경", "1973-01-01"],
+    "276": ["청송군", "2010-01-01"], "277": ["영덕", "1972-01-01"], "278": ["의성", "1973-01-01"],
+    "279": ["구미", "1973-01-01"], "281": ["영천", "1972-01-01"], "283": ["경주시", "2010-01-01"],
+    "284": ["거창", "1972-01-01"], "285": ["합천", "1973-01-01"], "288": ["밀양", "1973-01-01"],
+    "289": ["산청", "1973-01-01"], "294": ["거제", "1972-01-01"], "295": ["남해", "1972-01-01"]
+}
+
+# 3. 사이드바 UI
+st.sidebar.header("📋 분석 환경 설정")
+api_key = st.sidebar.text_input("1. API Key (Decoding)", type="password")
+
+station_options = [f"{v[0]} ({k})" for k, v in STATION_DB.items()]
+selected_stn = st.sidebar.selectbox("2. 관측소 선택", station_options, index=station_options.index("목포 (165)"))
+stn_id = selected_stn.split("(")[1].replace(")", "")
+stn_name = STATION_DB[stn_id][0]
+stn_start = STATION_DB[stn_id][1]
+
+st.sidebar.info(f"📌 {stn_name} 관측소\n- 데이터 가능 시점: {stn_start} 부터")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("📅 분석 기간 설정")
+start_date = st.sidebar.date_input("분석 시작일", date(2019, 1, 1))
+end_date = st.sidebar.date_input("분석 종료일", date(2023, 12, 31))
+
+limit_kt = st.sidebar.selectbox("3. 측풍 허용치 (Knot)", [10, 13, 20], index=0)
+
+# 4. 메인 로직
 if st.sidebar.button("🚀 분석 시작"):
     if not api_key:
         st.warning("API Key를 입력해주세요.")
-    elif start_date > end_date:
-        st.error("시작일이 종료일보다 늦을 수 없습니다.")
     else:
-        df = fetch_data(api_key, stn_id, start_date, end_date)
+        # 데이터 수집 (캐시 사용)
+        status_text = st.empty()
+        status_text.info(f"🔄 {stn_name} 관측소 데이터를 불러오고 있습니다. (최초 1회 소요)")
+        
+        df, count = get_cached_weather_data(api_key, stn_id, start_date, end_date)
         
         if df is not None:
-            # 활주로 방향 최적화 (0~180도)
+            status_text.success(f"✅ 데이터 {count:,}건 수집 완료! 분석을 시작합니다.")
+            
+            # 활주로 방향 최적화 (NumPy 벡터 연산으로 속도 극대화)
             angles = np.arange(0, 181, 1)
-            usability_results = []
+            usabilities = []
             
-            for a in angles:
-                diff = np.radians(df['wd'] - a)
-                crosswind = df['ws_kt'] * np.abs(np.sin(diff))
-                usable_pct = (crosswind <= limit_kt).sum() / len(df) * 100
-                usability_results.append(usable_pct)
-            
-            res_df = pd.DataFrame({'angle': angles, 'usability': usability_results})
+            # 진행 상태 표시
+            progress_bar = st.progress(0)
+            for i, a in enumerate(angles):
+                rad = np.radians(df['wd'] - a)
+                crosswind = df['ws_kt'] * np.abs(np.sin(rad))
+                usabilities.append((crosswind <= limit_kt).sum() / len(df) * 100)
+                if i % 20 == 0: progress_bar.progress(i / 180)
+            progress_bar.empty()
+
+            res_df = pd.DataFrame({'angle': angles, 'usability': usabilities})
             best = res_df.loc[res_df['usability'].idxmax()]
             
-            # --- 결과 시각화 ---
+            # --- 결과 대시보드 ---
             st.divider()
-            col1, col2, col3 = st.columns(3)
-            col1.metric("분석 대상", f"{station_name} ({stn_id})")
-            col2.metric("최적 방향 (Runway)", f"{int(best['angle']/10):02d}-{int((best['angle']+180)/10):02d}")
-            col3.metric("최대 이용률", f"{best['usability']:.2f}%")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("분석 관측소", stn_name)
+            c2.metric("최적 활주로 방향", f"{int(best['angle']/10):02d}-{int((best['angle']+180)/10):02d}", f"{int(best['angle'])}°")
+            c3.metric("최대 이용률", f"{best['usability']:.2f}%")
             
-            tab1, tab2, tab3 = st.tabs(["📊 방향별 이용률", "🌬️ 바람장미(Wind Rose)", "📋 데이터 정보"])
-            
-            with tab1:
-                fig1 = px.line(res_df, x='angle', y='usability', 
-                             title=f"활주로 방향에 따른 이용률 변화 ({start_date} ~ {end_date})")
-                fig1.add_hline(y=95, line_dash="dash", line_color="red", annotation_text="ICAO 기준(95%)")
-                st.plotly_chart(fig1, use_container_width=True)
-                
-            with tab2:
-                fig2 = px.bar_polar(df, r="ws_kt", theta="wd", color="ws_kt",
-                                   color_continuous_scale=px.colors.sequential.Viridis,
-                                   title=f"{station_name} 관측소 풍향/풍속 분포")
-                st.plotly_chart(fig2, use_container_width=True)
-
-            with tab3:
-                st.write(f"**데이터 요약**")
-                st.write(f"- 분석 기간: {start_date} ~ {end_date}")
-                st.write(f"- 전체 관측 시간: {len(df)} 시간")
-                st.dataframe(df.head(100))
+            t1, t2 = st.tabs(["📊 방향별 이용률",
