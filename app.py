@@ -134,4 +134,27 @@ if st.sidebar.button("🚀 분석 시작"):
             
             # --- 결과 시각화 ---
             st.divider()
-            col1, col2
+            col1, col2, col3 = st.columns(3)
+            col1.metric("분석 대상", f"{station_name} ({stn_id})")
+            col2.metric("최적 방향 (Runway)", f"{int(best['angle']/10):02d}-{int((best['angle']+180)/10):02d}")
+            col3.metric("최대 이용률", f"{best['usability']:.2f}%")
+            
+            tab1, tab2, tab3 = st.tabs(["📊 방향별 이용률", "🌬️ 바람장미(Wind Rose)", "📋 데이터 정보"])
+            
+            with tab1:
+                fig1 = px.line(res_df, x='angle', y='usability', 
+                             title=f"활주로 방향에 따른 이용률 변화 ({start_date} ~ {end_date})")
+                fig1.add_hline(y=95, line_dash="dash", line_color="red", annotation_text="ICAO 기준(95%)")
+                st.plotly_chart(fig1, use_container_width=True)
+                
+            with tab2:
+                fig2 = px.bar_polar(df, r="ws_kt", theta="wd", color="ws_kt",
+                                   color_continuous_scale=px.colors.sequential.Viridis,
+                                   title=f"{station_name} 관측소 풍향/풍속 분포")
+                st.plotly_chart(fig2, use_container_width=True)
+
+            with tab3:
+                st.write(f"**데이터 요약**")
+                st.write(f"- 분석 기간: {start_date} ~ {end_date}")
+                st.write(f"- 전체 관측 시간: {len(df)} 시간")
+                st.dataframe(df.head(100))
