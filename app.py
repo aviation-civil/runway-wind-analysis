@@ -79,4 +79,61 @@ if st.sidebar.button("🚀 분석 시작"):
             df = fetch_weather_data(api_key, stn_id, target_year)
             
             if df is not None:
-                # 활주로 방향별(0~180도,
+                # 활주로 방향별(0~180도, 1도 단위) 이용률 계산
+                angles = np.arange(0, 181, 1)
+                usability_list = []
+                
+                for angle in angles:
+                    # 측풍분력 공식: WindSpeed * sin(abs(WindDir - RunwayDir))
+                    # 활주로는 양방향(예: 02-20)이므로, 풍향과의 차이가 가장 작은 쪽으로 계산
+                    diff_rad = np.radians(df['wd'] - angle)
+                    crosswind = df['ws_kt'] * np.abs(np.sin(diff_rad))
+                    
+                    usable_count = (crosswind <= limit_kt).sum()
+                    usability_pct = (usable_count / len(df)) * 100
+                    usability_list.append(usability_pct)
+                
+                res_df = pd.DataFrame({'angle': angles, 'usability': usability_list})
+                best_idx = res_df['usability'].idxmax()
+                best_angle = res_df.loc[best_idx, 'angle']
+                max_usability = res_df.loc[best_idx, 'usability']
+                
+                # --- 결과 표시 ---
+                st.success(f"✅ 분석 완료! ({target_year}년 {stn_id}번 지점 데이터 기준)")
+                
+                col1, col2, col3 = st.columns(3)
+                col1.metric("최적 활주로 방향", f"{int(best_angle/10):02d}-{int((best_angle+180)/10):02d}", f"{best_angle}°")
+                col2.metric("최대 이용률", f"{max_usability:.2f} %")
+                col3.metric("판정 결과", "PASS" if max_usability >= 95 else "FAIL")
+                
+                if max_usability < 95:
+                    st.error(f"❗ 현재 기상 조건에서 이용률이 95%에 미달합니다. (허용치: {limit_kt}kt)")
+                else:
+                    st.info(f"✔️ 본 활주로는 {limit_kt}kt 측풍 기준에서 ICAO 권고치(95%)를 만족합니다.")
+
+                # --- 시각화 ---
+                tab1, tab2, tab3 = st.tabs(["📊 이용률 그래프", "🌬️ 바람장미(Wind Rose)", "📋 원본 데이터"])
+                
+                with tab1:
+                    st.subheader("방향별 활주로 이용률 변화")
+                    fig = px.line(res_df, x='angle', y='usability', 
+                                 labels={'angle': '활주로 방향 (도)', 'usability': '이용률 (%)'},
+                                 title="활주로 방향 변화에 따른 이용률 곡선")
+                    fig.add_hline(y=95, line_dash="dash", line_color="red", annotation_text="ICAO 기준(95%)")
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with tab2:
+                    st.subheader("바람장미 분포도")
+                    # Plotly를 이용한 바람장미 시각화
+                    fig_rose = px.bar_polar(df, r="ws_kt", theta="wd", 
+                                           color="ws_kt", 
+                                           color_continuous_scale=px.colors.sequential.Viridis,
+                                           labels={'ws_kt': '풍속 (kt)', 'wd': '풍향 (도)'},
+                                           title=f"{target_year}년 풍향/풍속 빈도 분포")
+                    st.plotly_chart(fig_rose, use_container_width=True)
+                
+                with tab3:
+                    st.write("기상청으로부터 수집된 시간별 데이터 (상위 100행)")
+                    st.dataframe(df.head(100))
+            else:
+                st.info("데이터를 불러오지 못했습니다. API 키의 유효성이나 관측소 번호를 확인하세요.")
