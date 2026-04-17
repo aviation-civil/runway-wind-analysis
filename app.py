@@ -2,15 +2,17 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-import plotly.express as px
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import time
 from datetime import datetime, date, timedelta
+from dateutil.relativedelta import relativedelta
 
 # 1. 페이지 설정
-st.set_page_config(page_title="활주로 분석기 V2.7 (안정화 버전)", layout="wide")
-st.title("✈️ 활주로 이용률 정밀 분석 (데이터 수집 안정성 강화)")
+st.set_page_config(page_title="활주로 분석기 V2.8 (서버 최적화)", layout="wide")
+st.title("✈️ 활주로 이용률 정밀 분석 (월별 분할 수집 버전)")
 
-# --- [내장 데이터] 기상청 모든 ASOS 지점 정보 (95개) ---
+# --- [내장 데이터] 기상청 ASOS 지점 정보 ---
 STATION_DB = {
     "90": ["속초", "1968-01-01"], "93": ["북춘천", "2016-10-01"], "95": ["철원", "1988-01-01"],
     "98": ["동두천", "1998-02-01"], "99": ["파주", "2001-12-01"], "100": ["대관령", "1971-12-01"],
@@ -46,51 +48,58 @@ STATION_DB = {
     "295": ["남해", "1972-01-01"]
 }
 
-# --- [캐시 데이터] 연도별 분할 수집 함수 ---
+# --- [안정화 로직] 세션 및 재시도 설정 ---
+session = requests.Session()
+retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+session.mount('http://', HTTPAdapter(max_retries=retries))
+
 @st.cache_data(show_spinner=False)
-def get_weather_data_v27(key, stn, s_date, e_date):
+def get_weather_data_v28(key, stn, s_date, e_date):
     url = "http://apis.data.go.kr/1360000/AsosHourlyInfoService/getWthrDataList"
     all_combined = []
     
-    # 분석 기간을 1년 단위 리스트로 쪼개기
-    years = range(s_date.year, e_date.year + 1)
-    
+    # 1. 월 단위로 날짜 쪼개기
+    current_date = s_date.replace(day=1)
+    date_list = []
+    while current_date <= e_date:
+        m_start = current_date.strftime("%Y%m%d")
+        # 해당 달의 마지막 날 계산
+        next_month = current_date + relativedelta(months=1)
+        m_end = min(e_date, next_month - timedelta(days=1)).strftime("%Y%m%d")
+        date_list.append((m_start, m_end))
+        current_date = next_month
+
     msg_slot = st.empty()
     p_bar = st.progress(0)
     
-    for i, year in enumerate(years):
-        # 해당 연도의 시작/종료일 설정
-        year_start = max(s_date, date(year, 1, 1)).strftime("%Y%m%d")
-        year_end = min(e_date, date(year, 12, 31)).strftime("%Y%m%d")
+    # 2. 월별 수집 시작
+    for i, (start, end) in enumerate(date_list):
+        msg_slot.info(f"⏳ 데이터 수집 중: {start[:4]}년 {start[4:6]}월 데이터 불러오는 중...")
         
-        msg_slot.info(f"⏳ {year}년 데이터 수집 중... 기상청 응답 대기 중")
+        params = {
+            'serviceKey': key, 'pageNo': '1', 'numOfRows': '999',
+            'dataType': 'JSON', 'dataCd': 'ASOS', 'dateCd': 'HR',
+            'startDt': start, 'startHh': '01', 'endDt': end, 'endHh': '23', 'stnIds': stn
+        }
         
-        # 1,000건씩 최대 10페이지 (1년치 대응)
-        for page in range(1, 11):
-            params = {
-                'serviceKey': key, 'pageNo': str(page), 'numOfRows': '999',
-                'dataType': 'JSON', 'dataCd': 'ASOS', 'dateCd': 'HR',
-                'startDt': year_start, 'startHh': '01', 'endDt': year_end, 'endHh': '23', 'stnIds': stn
-            }
+        try:
+            # 월별 데이터는 양이 적어(720건) 서버가 빠르게 응답합니다.
+            r = session.get(url, params=params, timeout=20)
+            res = r.json()
+            items = res.get('response', {}).get('body', {}).get('items', {}).get('item', [])
             
-            try:
-                # 타임아웃을 30초로 연장하고 3번까지 재시도
-                r = requests.get(url, params=params, timeout=30)
-                res = r.json()
-                items = res.get('response', {}).get('body', {}).get('items', {}).get('item', [])
-                
-                if not items: break
+            if items:
                 if isinstance(items, dict): items = [items]
                 all_combined.extend(items)
                 
-            except Exception as e:
-                return None, f"{year}년 데이터 수집 중 서버 응답 시간 초과 (Timeout). 잠시 후 다시 시도해 보세요."
-        
-        p_bar.progress((i + 1) / len(years))
-        time.sleep(0.1) # 서버 보호를 위한 짧은 휴식
+            p_bar.progress((i + 1) / len(date_list))
+            time.sleep(0.05) # 서버 부하 방지
+            
+        except Exception as e:
+            return None, f"{start[:6]} 데이터 수집 중 서버 오류가 반복되었습니다. 기상청 서버가 불안정합니다. 잠시 후 다시 시도해 주세요."
 
     if not all_combined:
-        return None, "수집된 데이터가 없습니다. 날짜와 지점을 확인하세요."
+        return None, "수집된 데이터가 없습니다. 지점의 관측 시작일을 확인하세요."
     
     df = pd.DataFrame(all_combined)
     df['wd'] = pd.to_numeric(df['wd'], errors='coerce')
@@ -106,7 +115,7 @@ selected_stn = st.sidebar.selectbox("2. 관측소 선택", stn_options, index=st
 stn_id = selected_stn.split("(")[1].replace(")", "")
 stn_name, stn_start = STATION_DB[stn_id]
 
-st.sidebar.success(f"📌 {stn_name} 관측 가능일: {stn_start} ~ 현재")
+st.sidebar.success(f"📌 {stn_name} 관측 시작일: {stn_start}")
 
 st.sidebar.markdown("---")
 start_date = st.sidebar.date_input("분석 시작일", date(2019, 1, 1))
@@ -122,17 +131,17 @@ if st.sidebar.button("🚀 분석 시작"):
     if not api_key:
         st.error("API Key를 입력하세요.")
     else:
-        df, result = get_weather_data_v27(api_key, stn_id, start_date, end_date)
+        df, result = get_weather_data_v28(api_key, stn_id, start_date, end_date)
         
         if df is not None:
             st.success(f"✅ {stn_name} {result:,}시간 데이터 분석 완료")
             
-            # 활주로 방향별 이용률 계산
+            # 이용률 계산
             angles = np.arange(0, 181, 1)
             usabilities = []
             for a in angles:
-                diff = np.radians(df['wd'] - a)
-                crosswind = df['ws_kt'] * np.abs(np.sin(diff))
+                rad = np.radians(df['wd'] - a)
+                crosswind = df['ws_kt'] * np.abs(np.sin(rad))
                 usabilities.append((crosswind <= limit_kt).sum() / len(df) * 100)
             
             res_df = pd.DataFrame({'angle': angles, 'usability': usabilities})
