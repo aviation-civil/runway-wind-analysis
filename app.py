@@ -5,12 +5,13 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import time
+import plotly.express as px  # <-- 에러 해결을 위해 추가된 핵심 라인!
 from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 
 # 1. 페이지 설정
-st.set_page_config(page_title="활주로 분석기 V2.8 (서버 최적화)", layout="wide")
-st.title("✈️ 활주로 이용률 정밀 분석 (월별 분할 수집 버전)")
+st.set_page_config(page_title="활주로 분석기 V2.9 (최종 수정)", layout="wide")
+st.title("✈️ 활주로 이용률 정밀 분석 (시각화 에러 수정 버전)")
 
 # --- [내장 데이터] 기상청 ASOS 지점 정보 ---
 STATION_DB = {
@@ -54,16 +55,14 @@ retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504]
 session.mount('http://', HTTPAdapter(max_retries=retries))
 
 @st.cache_data(show_spinner=False)
-def get_weather_data_v28(key, stn, s_date, e_date):
+def get_weather_data_v29(key, stn, s_date, e_date):
     url = "http://apis.data.go.kr/1360000/AsosHourlyInfoService/getWthrDataList"
     all_combined = []
     
-    # 1. 월 단위로 날짜 쪼개기
     current_date = s_date.replace(day=1)
     date_list = []
     while current_date <= e_date:
         m_start = current_date.strftime("%Y%m%d")
-        # 해당 달의 마지막 날 계산
         next_month = current_date + relativedelta(months=1)
         m_end = min(e_date, next_month - timedelta(days=1)).strftime("%Y%m%d")
         date_list.append((m_start, m_end))
@@ -72,35 +71,26 @@ def get_weather_data_v28(key, stn, s_date, e_date):
     msg_slot = st.empty()
     p_bar = st.progress(0)
     
-    # 2. 월별 수집 시작
     for i, (start, end) in enumerate(date_list):
-        msg_slot.info(f"⏳ 데이터 수집 중: {start[:4]}년 {start[4:6]}월 데이터 불러오는 중...")
-        
-        params = {
-            'serviceKey': key, 'pageNo': '1', 'numOfRows': '999',
-            'dataType': 'JSON', 'dataCd': 'ASOS', 'dateCd': 'HR',
-            'startDt': start, 'startHh': '01', 'endDt': end, 'endHh': '23', 'stnIds': stn
-        }
-        
-        try:
-            # 월별 데이터는 양이 적어(720건) 서버가 빠르게 응답합니다.
-            r = session.get(url, params=params, timeout=20)
-            res = r.json()
-            items = res.get('response', {}).get('body', {}).get('items', {}).get('item', [])
-            
-            if items:
+        msg_slot.info(f"⏳ 데이터 수집 중: {start[:4]}년 {start[4:6]}월 불러오는 중...")
+        for page in range(1, 11):
+            params = {
+                'serviceKey': key, 'pageNo': str(page), 'numOfRows': '999',
+                'dataType': 'JSON', 'dataCd': 'ASOS', 'dateCd': 'HR',
+                'startDt': start, 'startHh': '01', 'endDt': end, 'endHh': '23', 'stnIds': stn
+            }
+            try:
+                r = session.get(url, params=params, timeout=30)
+                res = r.json()
+                items = res.get('response', {}).get('body', {}).get('items', {}).get('item', [])
+                if not items: break
                 if isinstance(items, dict): items = [items]
                 all_combined.extend(items)
-                
-            p_bar.progress((i + 1) / len(date_list))
-            time.sleep(0.05) # 서버 부하 방지
-            
-        except Exception as e:
-            return None, f"{start[:6]} 데이터 수집 중 서버 오류가 반복되었습니다. 기상청 서버가 불안정합니다. 잠시 후 다시 시도해 주세요."
-
-    if not all_combined:
-        return None, "수집된 데이터가 없습니다. 지점의 관측 시작일을 확인하세요."
+            except Exception as e:
+                return None, f"서버 응답 초과. 잠시 후 시도하세요."
+        p_bar.progress((i + 1) / len(date_list))
     
+    if not all_combined: return None, "데이터가 없습니다."
     df = pd.DataFrame(all_combined)
     df['wd'] = pd.to_numeric(df['wd'], errors='coerce')
     df['ws_kt'] = pd.to_numeric(df['ws'], errors='coerce') * 1.94384
@@ -111,32 +101,28 @@ st.sidebar.header("📋 분석 설정")
 api_key = st.sidebar.text_input("1. API Key (Decoding)", type="password")
 
 stn_options = [f"{v[0]} ({k})" for k, v in STATION_DB.items()]
-selected_stn = st.sidebar.selectbox("2. 관측소 선택", stn_options, index=stn_options.index("목포 (165)"))
+selected_stn = st.sidebar.selectbox("2. 관측소 선택", stn_options, index=stn_options.index("광주 (156)"))
 stn_id = selected_stn.split("(")[1].replace(")", "")
 stn_name, stn_start = STATION_DB[stn_id]
 
-st.sidebar.success(f"📌 {stn_name} 관측 시작일: {stn_start}")
+st.sidebar.success(f"📌 {stn_name} 관측 시작: {stn_start}")
 
 st.sidebar.markdown("---")
-start_date = st.sidebar.date_input("분석 시작일", date(2019, 1, 1))
-end_date = st.sidebar.date_input("분석 종료일", date(2023, 12, 31))
+start_date = st.sidebar.date_input("시작일", date(2019, 1, 1))
+end_date = st.sidebar.date_input("종료일", date(2023, 12, 31))
 limit_kt = st.sidebar.selectbox("3. 측풍 허용치 (Knot)", [10, 13, 20], index=0)
 
 if st.sidebar.button("🧹 데이터 캐시 삭제"):
     st.cache_data.clear()
-    st.sidebar.info("캐시가 삭제되었습니다.")
+    st.sidebar.info("삭제 완료.")
 
 # 3. 분석 실행
 if st.sidebar.button("🚀 분석 시작"):
-    if not api_key:
-        st.error("API Key를 입력하세요.")
+    if not api_key: st.error("키를 입력하세요.")
     else:
-        df, result = get_weather_data_v28(api_key, stn_id, start_date, end_date)
-        
+        df, result = get_weather_data_v29(api_key, stn_id, start_date, end_date)
         if df is not None:
             st.success(f"✅ {stn_name} {result:,}시간 데이터 분석 완료")
-            
-            # 이용률 계산
             angles = np.arange(0, 181, 1)
             usabilities = []
             for a in angles:
@@ -147,7 +133,6 @@ if st.sidebar.button("🚀 분석 시작"):
             res_df = pd.DataFrame({'angle': angles, 'usability': usabilities})
             best = res_df.loc[res_df['usability'].idxmax()]
 
-            # 결과 화면
             st.divider()
             c1, c2, c3 = st.columns(3)
             c1.metric("최적 활주로", f"{int(best['angle']/10):02d}-{int((best['angle']+180)/10):02d}")
@@ -156,11 +141,12 @@ if st.sidebar.button("🚀 분석 시작"):
 
             t1, t2 = st.tabs(["📈 이용률 곡선", "🌀 바람장미"])
             with t1:
-                fig1 = px.line(res_df, x='angle', y='usability', title="방향별 이용률")
-                fig1.add_hline(y=95, line_dash="dash", line_color="red")
+                fig1 = px.line(res_df, x='angle', y='usability', title="방향별 활주로 이용률 곡선")
+                fig1.add_hline(y=95, line_dash="dash", line_color="red", annotation_text="ICAO 기준(95%)")
                 st.plotly_chart(fig1, use_container_width=True)
             with t2:
-                fig2 = px.bar_polar(df, r="ws_kt", theta="wd", color="ws_kt", title="Wind Rose")
+                fig2 = px.bar_polar(df, r="ws_kt", theta="wd", color="ws_kt", 
+                                   color_continuous_scale=px.colors.sequential.Viridis,
+                                   title="풍향/풍속 빈도 분포 (Wind Rose)")
                 st.plotly_chart(fig2, use_container_width=True)
-        else:
-            st.error(f"❌ 분석 실패: {result}")
+        else: st.error(f"❌ 분석 실패: {result}")
